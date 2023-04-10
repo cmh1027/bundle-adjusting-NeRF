@@ -26,8 +26,9 @@ class Model(base.Model):
     def load_dataset(self,opt,eval_split="val"):
         super().load_dataset(opt,eval_split=eval_split)
         # prefetch all training data
-        self.train_data.prefetch_all_data(opt)
-        self.train_data.all = edict(util.move_to_device(self.train_data.all,opt.device))
+        if opt.data.dataset != 'phototourism':
+            self.train_data.prefetch_all_data(opt)
+            self.train_data.all = edict(util.move_to_device(self.train_data.all,opt.device))
 
     def setup_optimizer(self,opt):
         log.info("setting up optimizers...")
@@ -40,7 +41,7 @@ class Model(base.Model):
             scheduler = getattr(torch.optim.lr_scheduler,opt.optim.sched.type)
             if opt.optim.lr_end:
                 assert(opt.optim.sched.type=="ExponentialLR")
-                opt.optim.sched.gamma = (opt.optim.lr_end/opt.optim.lr)**(1./opt.max_iter)
+                opt.optim.sched.gamma = (opt.optim.lr_end/opt.optim.lr)**(1./(opt.max_iter*len(self.train_loader)))
             kwargs = { k:v for k,v in opt.optim.sched.items() if k!="type" }
             self.sched = scheduler(self.optim,**kwargs)
 
@@ -51,16 +52,27 @@ class Model(base.Model):
         self.graph.train()
         self.ep = 0 # dummy for timer
         # training
-        if self.iter_start==0: self.validate(opt,0)
-        loader = tqdm.trange(opt.max_iter,desc="training",leave=False)
-        for self.it in loader:
-            if self.it<self.iter_start: continue
-            # set var to all available images
-            var = self.train_data.all
-            self.train_iteration(opt,var,loader)
-            if opt.optim.sched: self.sched.step()
-            if self.it%opt.freq.val==0: self.validate(opt,self.it)
-            if self.it%opt.freq.ckpt==0: self.save_checkpoint(opt,ep=None,it=self.it)
+        # if self.iter_start==0: self.validate(opt,0)
+        # loader = tqdm.trange(opt.max_iter,desc="training",leave=False)
+        # for self.it in loader:
+        #     if self.it<self.iter_start: continue
+        #     # set var to all available images
+        #     var = self.train_data.all
+        #     self.train_iteration(opt,var,loader)
+        #     if opt.optim.sched: self.sched.step()
+        #     if self.it%opt.freq.val==0: self.validate(opt,self.it)
+        #     if self.it%opt.freq.ckpt==0: self.save_checkpoint(opt,ep=None,it=self.it)
+        for epoch in tqdm.trange(opt.max_iter,desc="training",leave=False):
+            loader = tqdm.tqdm(self.train_loader,desc="training epoch {}".format(epoch+1),leave=False)
+            for i_pic, batch in enumerate(loader):
+                self.it = epoch * len(loader) + i_pic
+                # train iteration
+                var = edict(batch)
+                var = util.move_to_device(var,opt.device)
+                self.train_iteration(opt,var,loader)
+                if opt.optim.sched: self.sched.step()
+                if self.it%opt.freq.val==0: self.validate(opt,self.it)
+                if self.it%opt.freq.ckpt==0: self.save_checkpoint(opt,ep=epoch,it=self.it)
         # after training
         if opt.tb:
             self.tb.flush()
@@ -87,18 +99,20 @@ class Model(base.Model):
 
     @torch.no_grad()
     def visualize(self,opt,var,step=0,split="train",eps=1e-10):
+        if 'W' in var and 'H' in var: W, H = int(var.W), int(var.H)
+        else: W, H = opt.W, opt.H
         if opt.tb:
             util_vis.tb_image(opt,self.tb,step,split,"image",var.image)
-            if not opt.nerf.rand_rays or split!="train":
+            if split!="train":
                 invdepth = (1-var.depth)/var.opacity if opt.camera.ndc else 1/(var.depth/var.opacity+eps)
-                rgb_map = var.rgb.view(-1,opt.H,opt.W,3).permute(0,3,1,2) # [B,3,H,W]
-                invdepth_map = invdepth.view(-1,opt.H,opt.W,1).permute(0,3,1,2) # [B,1,H,W]
+                rgb_map = var.rgb.view(-1,H,W,3).permute(0,3,1,2) # [B,3,H,W]
+                invdepth_map = invdepth.view(-1,H,W,1).permute(0,3,1,2) # [B,1,H,W]
                 util_vis.tb_image(opt,self.tb,step,split,"rgb",rgb_map)
                 util_vis.tb_image(opt,self.tb,step,split,"invdepth",invdepth_map)
                 if opt.nerf.fine_sampling:
                     invdepth = (1-var.depth_fine)/var.opacity_fine if opt.camera.ndc else 1/(var.depth_fine/var.opacity_fine+eps)
-                    rgb_map = var.rgb_fine.view(-1,opt.H,opt.W,3).permute(0,3,1,2) # [B,3,H,W]
-                    invdepth_map = invdepth.view(-1,opt.H,opt.W,1).permute(0,3,1,2) # [B,1,H,W]
+                    rgb_map = var.rgb_fine.view(-1,H,W,3).permute(0,3,1,2) # [B,3,H,W]
+                    invdepth_map = invdepth.view(-1,H,W,1).permute(0,3,1,2) # [B,1,H,W]
                     util_vis.tb_image(opt,self.tb,step,split,"rgb_fine",rgb_map)
                     util_vis.tb_image(opt,self.tb,step,split,"invdepth_fine",invdepth_map)
 
@@ -203,19 +217,29 @@ class Graph(base.Graph):
         # render images
         if opt.nerf.rand_rays and mode in ["train","test-optim"]:
             # sample random rays for optimization
-            var.ray_idx = torch.randperm(opt.H*opt.W,device=opt.device)[:opt.nerf.rand_rays//batch_size]
-            ret = self.render(opt,pose,intr=var.intr,ray_idx=var.ray_idx,mode=mode) # [B,N,3],[B,N,1]
+            if 'W' in var and 'H' in var: 
+                var.ray_idx = torch.randperm(int(var.H)*int(var.W),device=opt.device)[:opt.nerf.rand_rays//batch_size]
+                ret = self.render(opt,pose,intr=var.intr,ray_idx=var.ray_idx,mode=mode, HW=(int(var.H), int(var.W))) # [B,N,3],[B,N,1]
+            else: 
+                var.ray_idx = torch.randperm(opt.H*opt.W,device=opt.device)[:opt.nerf.rand_rays//batch_size]
+                ret = self.render(opt,pose,intr=var.intr,ray_idx=var.ray_idx,mode=mode) # [B,N,3],[B,N,1]
         else:
             # render full image (process in slices)
-            ret = self.render_by_slices(opt,pose,intr=var.intr,mode=mode) if opt.nerf.rand_rays else \
-                  self.render(opt,pose,intr=var.intr,mode=mode) # [B,HW,3],[B,HW,1]
+            if 'W' in var and 'H' in var: 
+                ret = self.render_by_slices(opt,pose,intr=var.intr,mode=mode, HW=(int(var.H), int(var.W))) if opt.nerf.rand_rays else \
+                    self.render(opt,pose,intr=var.intr,mode=mode, HW=(int(var.H), int(var.W))) # [B,HW,3],[B,HW,1]
+            else:
+                ret = self.render_by_slices(opt,pose,intr=var.intr,mode=mode) if opt.nerf.rand_rays else \
+                    self.render(opt,pose,intr=var.intr,mode=mode) # [B,HW,3],[B,HW,1]
         var.update(ret)
         return var
 
     def compute_loss(self,opt,var,mode=None):
         loss = edict()
         batch_size = len(var.idx)
-        image = var.image.view(batch_size,3,opt.H*opt.W).permute(0,2,1)
+        if 'W' in var and 'H' in var: W, H = int(var.W), int(var.H)
+        else: W, H = opt.W, opt.H
+        image = var.image.view(batch_size, 3, int(H*W)).permute(0,2,1)
         if opt.nerf.rand_rays and mode in ["train","test-optim"]:
             image = image[:,var.ray_idx]
         # compute image losses
@@ -229,11 +253,11 @@ class Graph(base.Graph):
     def get_pose(self,opt,var,mode=None):
         return var.pose
 
-    def render(self,opt,pose,intr=None,ray_idx=None,mode=None):
+    def render(self,opt,pose,intr=None,ray_idx=None,mode=None, HW=None):
         batch_size = len(pose)
-        center,ray = camera.get_center_and_ray(opt,pose,intr=intr) # [B,HW,3]
+        center,ray = camera.get_center_and_ray(opt,pose,intr=intr, HW=HW) # [B,HW,3]
         while ray.isnan().any(): # TODO: weird bug, ray becomes NaN arbitrarily if batch_size>1, not deterministic reproducible
-            center,ray = camera.get_center_and_ray(opt,pose,intr=intr) # [B,HW,3]
+            center,ray = camera.get_center_and_ray(opt,pose,intr=intr, HW=HW) # [B,HW,3]
         if ray_idx is not None:
             # consider only subset of rays
             center,ray = center[:,ray_idx],ray[:,ray_idx]
@@ -257,22 +281,24 @@ class Graph(base.Graph):
             ret.update(rgb_fine=rgb_fine,depth_fine=depth_fine,opacity_fine=opacity_fine) # [B,HW,K]
         return ret
 
-    def render_by_slices(self,opt,pose,intr=None,mode=None):
+    def render_by_slices(self,opt,pose,intr=None,mode=None, HW=None):
         ret_all = edict(rgb=[],depth=[],opacity=[])
         if opt.nerf.fine_sampling:
             ret_all.update(rgb_fine=[],depth_fine=[],opacity_fine=[])
+        if HW is None: H, W = opt.H, opt.W
+        else: H, W = HW
         # render the image by slices for memory considerations
-        for c in range(0,opt.H*opt.W,opt.nerf.rand_rays):
-            ray_idx = torch.arange(c,min(c+opt.nerf.rand_rays,opt.H*opt.W),device=opt.device)
-            ret = self.render(opt,pose,intr=intr,ray_idx=ray_idx,mode=mode) # [B,R,3],[B,R,1]
+        for c in range(0, H*W,opt.nerf.rand_rays):
+            ray_idx = torch.arange(c,min(c+opt.nerf.rand_rays,H*W),device=opt.device)
+            ret = self.render(opt,pose,intr=intr,ray_idx=ray_idx,mode=mode, HW=HW) # [B,R,3],[B,R,1]
             for k in ret: ret_all[k].append(ret[k])
         # group all slices of images
         for k in ret_all: ret_all[k] = torch.cat(ret_all[k],dim=1)
         return ret_all
 
-    def sample_depth(self,opt,batch_size,num_rays=None):
+    def sample_depth(self,opt,batch_size,num_rays):
         depth_min,depth_max = opt.nerf.depth.range
-        num_rays = num_rays or opt.H*opt.W
+        num_rays = num_rays
         rand_samples = torch.rand(batch_size,num_rays,opt.nerf.sample_intvs,1,device=opt.device) if opt.nerf.sample_stratified else 0.5
         rand_samples += torch.arange(opt.nerf.sample_intvs,device=opt.device)[None,None,:,None].float() # [B,HW,N,1]
         depth_samples = rand_samples/opt.nerf.sample_intvs*(depth_max-depth_min)+depth_min # [B,HW,N,1]

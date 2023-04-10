@@ -39,7 +39,7 @@ class Model(nerf.Model):
             scheduler = getattr(torch.optim.lr_scheduler,opt.optim.sched_pose.type)
             if opt.optim.lr_pose_end:
                 assert(opt.optim.sched_pose.type=="ExponentialLR")
-                opt.optim.sched_pose.gamma = (opt.optim.lr_pose_end/opt.optim.lr_pose)**(1./opt.max_iter)
+                opt.optim.sched_pose.gamma = (opt.optim.lr_pose_end/opt.optim.lr_pose)**(1./(opt.max_iter*len(self.train_loader)))
             kwargs = { k:v for k,v in opt.optim.sched_pose.items() if k!="type" }
             self.sched_pose = scheduler(self.optim_pose,**kwargs)
 
@@ -73,7 +73,7 @@ class Model(nerf.Model):
             lr = self.optim_pose.param_groups[0]["lr"]
             self.tb.add_scalar("{0}/{1}".format(split,"lr_pose"),lr,step)
         # compute pose error
-        if split=="train" and opt.data.dataset in ["blender","llff"]:
+        if split=="train" and opt.data.dataset in ["blender","llff", "phototourism"]:
             pose,pose_GT = self.get_all_training_poses(opt)
             pose_aligned,_ = self.prealign_cameras(opt,pose,pose_GT)
             error = self.evaluate_camera_alignment(opt,pose_aligned,pose_GT)

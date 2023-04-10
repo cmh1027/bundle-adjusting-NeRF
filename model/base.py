@@ -9,7 +9,6 @@ import visdom
 import importlib
 import tqdm
 from easydict import EasyDict as edict
-
 import util,util_vis
 from util import log,debug
 
@@ -159,7 +158,7 @@ class Model():
             if it==0: self.visualize(opt,var,step=ep,split="val")
         for key in loss_val: loss_val[key] /= len(self.test_data)
         self.log_scalars(opt,var,loss_val,step=ep,split="val")
-        log.loss_val(opt,loss_val.all)
+        # log.loss_val(opt,loss_val.all)
 
     @torch.no_grad()
     def log_scalars(self,opt,var,loss,metric=None,step=0,split="train"):
@@ -173,6 +172,7 @@ class Model():
 
     @torch.no_grad()
     def visualize(self,opt,var,step=0,split="train"):
+        if not opt.log: return
         raise NotImplementedError
 
     def save_checkpoint(self,opt,ep=0,it=0,latest=False):

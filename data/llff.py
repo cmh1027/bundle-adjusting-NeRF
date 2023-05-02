@@ -24,7 +24,7 @@ class Dataset(base.Dataset):
         self.path_image = "{}/images".format(self.path)
         image_fnames = sorted(os.listdir(self.path_image))
         poses_raw,bounds = self.parse_cameras_and_bounds(opt)
-        self.list = list(zip(image_fnames,poses_raw,bounds))
+        self.list = list(zip(image_fnames,poses_raw))
         # manually split train/val subsets
         num_val_split = int(len(self)*opt.data.val_ratio)
         self.list = self.list[:-num_val_split] if split=="train" else self.list[-num_val_split:]

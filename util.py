@@ -92,10 +92,11 @@ def update_timer(opt,timer,ep,it_per_ep):
     timer.arrival = timer.it_mean*it_per_ep*(opt.max_epoch-ep)
 
 # move tensors to device in-place
-def move_to_device(X,device):
+def move_to_device(X,device,exclude=[]):
     if isinstance(X,dict):
         for k,v in X.items():
-            X[k] = move_to_device(v,device)
+            if k not in exclude:
+                X[k] = move_to_device(v,device)
     elif isinstance(X,list):
         for i,e in enumerate(X):
             X[i] = move_to_device(e,device)
@@ -188,3 +189,7 @@ def colorcode_to_number(code):
     ords = [n-48 if n<58 else n-87 for n in ords]
     rgb = (ords[0]*16+ords[1],ords[2]*16+ords[3],ords[4]*16+ords[5])
     return rgb
+
+def merge_edict(src, tgt, prefix="", postfix=""):
+    for key, value in src.items():
+        setattr(tgt, f'{prefix}{key}{postfix}', value)

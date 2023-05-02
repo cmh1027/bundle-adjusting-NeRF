@@ -13,6 +13,7 @@ import util,util_vis
 from util import log,debug
 from . import nerf
 import camera
+import math
 
 # ============================ main engine for training and evaluation ============================
 
@@ -29,6 +30,10 @@ class Model(nerf.Model):
             self.graph.pose_noise = camera.lie.se3_to_SE3(se3_noise)
         self.graph.se3_refine = torch.nn.Embedding(len(self.train_data),6).to(opt.device)
         torch.nn.init.zeros_(self.graph.se3_refine.weight)
+        if opt.transient.encode:
+            self.graph.embedding_t = torch.nn.Embedding(len(self.train_data), opt.transient.size).to(opt.device)
+            torch.nn.init.xavier_uniform_(self.graph.embedding_t.weight)
+
 
     def setup_optimizer(self,opt):
         super().setup_optimizer(opt)
@@ -66,8 +71,8 @@ class Model(nerf.Model):
         super().validate(opt,ep=ep)
 
     @torch.no_grad()
-    def log_scalars(self,opt,var,loss,metric=None,step=0,split="train"):
-        super().log_scalars(opt,var,loss,metric=metric,step=step,split=split)
+    def log_scalars(self,opt,var,loss,metric=None,step=0,split="train", mse=None):
+        super().log_scalars(opt,var,loss,metric=metric,step=step,split=split, mse=mse)
         if split=="train":
             # log learning rate
             lr = self.optim_pose.param_groups[0]["lr"]
@@ -261,3 +266,15 @@ class NeRF(nerf.NeRF):
             shape = input_enc.shape
             input_enc = (input_enc.view(-1,L)*weight).view(*shape)
         return input_enc
+
+    def get_refine_coef(self, opt):
+        progress = self.progress.data
+        s,e = opt.decay.start
+        if progress<s:
+            coef = 0
+        elif progress>e:
+            coef = 1
+        else:
+            progress = (progress-s)/(e-s)
+            coef = (1-math.cos(math.pi*progress))/2
+        return coef

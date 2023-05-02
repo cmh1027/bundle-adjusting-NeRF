@@ -92,11 +92,13 @@ class Dataset(torch.utils.data.Dataset):
 
     def preprocess_image(self,opt,image,aug=None):
         if aug is not None:
+            assert(not opt.feature.encode)
             image = self.apply_color_jitter(opt,image,aug.color_jitter)
             image = torchvision_F.hflip(image) if aug.flip else image
             image = image.rotate(aug.rot_angle,resample=PIL.Image.BICUBIC)
         # center crop
         if opt.data.center_crop is not None:
+            assert(not opt.feature.encode)
             self.crop_H = int(self.raw_H*opt.data.center_crop)
             self.crop_W = int(self.raw_W*opt.data.center_crop)
             image = torchvision_F.center_crop(image,(self.crop_H,self.crop_W))
@@ -106,6 +108,16 @@ class Dataset(torch.utils.data.Dataset):
             image = image.resize((opt.W,opt.H))
         image = torchvision_F.to_tensor(image)
         return image
+
+    def preprocess_feature(self,opt,feat):
+        if type(feat) is np.ndarray:
+            feat = torch.from_numpy(feat)
+        # resize
+        if opt.data.image_size[0] is not None:
+            feat = feat.unsqueeze(0)
+            feat = torch_F.interpolate(feat, size=(opt.W, opt.H), mode='bilinear')
+            feat = feat.squeeze(0)
+        return feat
 
     def preprocess_camera(self,opt,intr,pose,aug=None):
         intr,pose = intr.clone(),pose.clone()

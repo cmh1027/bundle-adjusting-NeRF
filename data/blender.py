@@ -32,6 +32,8 @@ class Dataset(base.Dataset):
         if opt.data.preload:
             self.images = self.preload_threading(opt,self.get_image)
             self.cameras = self.preload_threading(opt,self.get_camera,data_str="cameras")
+            if opt.feature.encode:
+                self.feats = self.preload_threading(opt,self.get_feature,data_str="features")
 
     def prefetch_all_data(self,opt):
         assert(not opt.data.augment)
@@ -49,6 +51,12 @@ class Dataset(base.Dataset):
         aug = self.generate_augmentation(opt) if self.augment else None
         image = self.images[idx] if opt.data.preload else self.get_image(opt,idx)
         image = self.preprocess_image(opt,image,aug=aug)
+        if opt.feature.encode:
+            feat = self.feats[idx] if opt.data.preload else self.get_feature(opt,idx)
+            feat = self.preprocess_feature(opt,feat)
+            sample.update(
+                feat_gt=feat
+            )
         intr,pose = self.cameras[idx] if opt.data.preload else self.get_camera(opt,idx)
         intr,pose = self.preprocess_camera(opt,intr,pose,aug=aug)
         sample.update(
@@ -57,6 +65,11 @@ class Dataset(base.Dataset):
             pose=pose,
         )
         return sample
+
+    def get_feature(self, opt, idx):
+        feat_fname = "{}/dino_feature_map/{}.npy".format(self.path,self.list[idx]["file_path"])
+        feat = np.load(feat_fname)
+        return feat
 
     def get_image(self,opt,idx):
         image_fname = "{}/{}.png".format(self.path,self.list[idx]["file_path"])

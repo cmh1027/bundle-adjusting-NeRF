@@ -113,15 +113,18 @@ class Model():
         # train iteration
         self.optim.zero_grad()
         var = self.graph.forward(opt,var,mode="train")
-        loss = self.graph.compute_loss(opt,var,mode="train")
+        loss, mse = self.graph.compute_loss(opt,var,mode="train")
         loss = self.summarize_loss(opt,var,loss)
         loss.all.backward()
         self.optim.step()
         # after train iteration
-        if (self.it+1)%opt.freq.scalar==0: self.log_scalars(opt,var,loss,step=self.it+1,split="train")
+        if (self.it+1)%opt.freq.scalar==0: self.log_scalars(opt,var,loss,step=self.it+1,split="train",mse=mse)
         if (self.it+1)%opt.freq.vis==0: self.visualize(opt,var,step=self.it+1,split="train")
         self.it += 1
-        loader.set_postfix(it=self.it,loss="{:.3f}".format(loss.all))
+        if not opt.transient.encode:
+            loader.set_postfix(it=self.it,loss="{:.3f}".format(loss.all))
+        else:
+            loader.set_postfix(it=self.it,loss="{:.3f}".format(loss.all),decay=self.graph.nerf.get_refine_coef(opt))
         self.timer.it_end = time.time()
         util.update_timer(opt,self.timer,self.ep,len(loader))
         return loss
@@ -131,12 +134,15 @@ class Model():
         assert("all" not in loss)
         # weigh losses
         for key in loss:
-            assert(key in opt.loss_weight)
-            assert(loss[key].shape==())
-            if opt.loss_weight[key] is not None:
-                assert not torch.isinf(loss[key]),"loss {} is Inf".format(key)
-                assert not torch.isnan(loss[key]),"loss {} is NaN".format(key)
-                loss_all += 10**float(opt.loss_weight[key])*loss[key]
+            # assert(key in opt.loss_weight)
+            # assert(loss[key].shape==())
+            # if key in opt.loss_weight:
+            #     if opt.loss_weight[key] is not None:
+            #         assert not torch.isinf(loss[key]),"loss {} is Inf".format(key)
+            #         assert not torch.isnan(loss[key]),"loss {} is NaN".format(key)
+            #         loss_all += 10**float(opt.loss_weight[key])*loss[key]
+            # else:
+            loss_all += loss[key]
         loss.update(all=loss_all)
         return loss
 
@@ -149,7 +155,7 @@ class Model():
             var = edict(batch)
             var = util.move_to_device(var,opt.device)
             var = self.graph.forward(opt,var,mode="val")
-            loss = self.graph.compute_loss(opt,var,mode="val")
+            loss, mse = self.graph.compute_loss(opt,var,mode="val")
             loss = self.summarize_loss(opt,var,loss)
             for key in loss:
                 loss_val.setdefault(key,0.)
@@ -157,18 +163,20 @@ class Model():
             loader.set_postfix(loss="{:.3f}".format(loss.all))
             if it==0: self.visualize(opt,var,step=ep,split="val")
         for key in loss_val: loss_val[key] /= len(self.test_data)
-        self.log_scalars(opt,var,loss_val,step=ep,split="val")
+        self.log_scalars(opt,var,loss_val,step=ep,split="val", mse=mse)
         # log.loss_val(opt,loss_val.all)
 
     @torch.no_grad()
     def log_scalars(self,opt,var,loss,metric=None,step=0,split="train"):
         for key,value in loss.items():
             if key=="all": continue
-            if opt.loss_weight[key] is not None:
+            if key not in opt.loss_weight or opt.loss_weight[key] is not None:
                 self.tb.add_scalar("{0}/loss_{1}".format(split,key),value,step)
         if metric is not None:
             for key,value in metric.items():
                 self.tb.add_scalar("{0}/{1}".format(split,key),value,step)
+        if opt.transient.encode:
+            self.tb.add_scalar("train/decay",self.graph.nerf.get_refine_coef(opt),step)
 
     @torch.no_grad()
     def visualize(self,opt,var,step=0,split="train"):
@@ -177,8 +185,8 @@ class Model():
 
     def save_checkpoint(self,opt,ep=0,it=0,latest=False):
         util.save_checkpoint(opt,self,ep=ep,it=it,latest=latest)
-        if not latest:
-            log.info("checkpoint saved: ({0}) {1}, epoch {2} (iteration {3})".format(opt.group,opt.name,ep,it))
+        # if not latest:
+        #     log.info("checkpoint saved: ({0}) {1}, epoch {2} (iteration {3})".format(opt.group,opt.name,ep,it))
 
 # ============================ computation graph for forward/backprop ============================
 

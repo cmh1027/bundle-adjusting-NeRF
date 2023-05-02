@@ -22,13 +22,13 @@ def main():
         m.load_dataset(opt,eval_split="test")
         m.build_networks(opt)
 
-        if opt.model=="barf":
-            m.generate_videos_pose(opt)
+        # if opt.model=="barf":
+        #     m.generate_videos_pose(opt)
 
         m.restore_checkpoint(opt)
-        if opt.data.dataset in ["blender","llff"]:
+        if opt.data.dataset in ["blender","llff", "phototourism"]:
             m.evaluate_full(opt)
-        m.generate_videos_synthesis(opt)
+        # m.generate_videos_synthesis(opt)
 
 if __name__=="__main__":
     main()

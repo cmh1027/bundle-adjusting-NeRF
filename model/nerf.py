@@ -388,8 +388,7 @@ class NeRF(torch.nn.Module):
             self.mlp_xyz.append(linear)
         if opt.transient.encode or opt.feature.encode:
             # Our implementation has one additional layer
-            linear = torch.nn.Linear(k_out,k_out)
-            self.mlp_xyz.append(linear)
+            self.mlp_xyz_final = torch.nn.Linear(k_out,k_out)
             # Our implementation has specific layer for density
             self.mlp_density = torch.nn.Sequential(
                 torch.nn.Linear(k_out, 1),
@@ -488,10 +487,10 @@ class NeRF(torch.nn.Module):
             for li,layer in enumerate(self.mlp_xyz):
                 if li in opt.arch.skip: xyz = torch.cat([xyz,points_enc],dim=-1)
                 xyz = layer(xyz)
-                if li!=len(self.mlp_xyz)-1:
-                    xyz = torch_F.relu(xyz)
+                xyz = torch_F.relu(xyz)
             density = self.mlp_density(xyz).squeeze(-1)
             ret.update(density=density)
+            xyz = self.mlp_xyz_final(xyz)
             # extract transient features (with density)
             if opt.transient.encode:
                 while t_emb.dim() < xyz.dim():

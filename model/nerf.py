@@ -42,7 +42,10 @@ class Model(base.Model):
             scheduler = getattr(torch.optim.lr_scheduler,opt.optim.sched.type)
             if opt.optim.lr_end:
                 assert(opt.optim.sched.type=="ExponentialLR")
-                opt.optim.sched.gamma = (opt.optim.lr_end/opt.optim.lr)**(1./(opt.max_iter*len(self.train_loader)))
+                if opt.data.dataset == "phototourism":
+                    opt.optim.sched.gamma = (opt.optim.lr_end/opt.optim.lr)**(1./(opt.max_iter*len(self.train_loader)))
+                else:
+                    opt.optim.sched.gamma = (opt.optim.lr_end/opt.optim.lr)**(1./opt.max_iter)
             kwargs = { k:v for k,v in opt.optim.sched.items() if k!="type" }
             self.sched = scheduler(self.optim,**kwargs)
 
@@ -548,11 +551,13 @@ class NeRF(torch.nn.Module):
         dist_samples = depth_intv_samples*ray_length # [B,HW,N]
         sigma_delta = samples.density*dist_samples # [B,HW,N]\
         alpha = 1-(-sigma_delta).exp_() # [B,HW,N]
-        alpha_sum = alpha
+        
         if opt.transient.encode:
             sigma_t_delta = samples.density_t*dist_samples # [B,HW,N]
             alpha_t = 1-(-sigma_t_delta).exp_() # [B,HW,N]
-            alpha_sum += alpha_t
+            alpha_sum = 1-(-(sigma_delta + sigma_t_delta)).exp_()
+        else:
+            alpha_sum = alpha
         static_T = (-torch.cat([torch.zeros_like(sigma_delta[...,:1]),sigma_delta[...,:-1]],dim=2).cumsum(dim=2)).exp_() # [B,HW,N]
         if opt.transient.encode:
             composite_T = (-torch.cat([torch.zeros_like(sigma_delta[...,:1]),sigma_delta[...,:-1]+sigma_t_delta[...,:-1]],dim=2).cumsum(dim=2)).exp_() # [B,HW,N]

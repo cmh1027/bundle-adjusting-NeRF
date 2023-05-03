@@ -44,7 +44,10 @@ class Model(nerf.Model):
             scheduler = getattr(torch.optim.lr_scheduler,opt.optim.sched_pose.type)
             if opt.optim.lr_pose_end:
                 assert(opt.optim.sched_pose.type=="ExponentialLR")
-                opt.optim.sched_pose.gamma = (opt.optim.lr_pose_end/opt.optim.lr_pose)**(1./(opt.max_iter*len(self.train_loader)))
+                if opt.data.dataset == "phototourism":
+                    opt.optim.sched_pose.gamma = (opt.optim.lr_pose_end/opt.optim.lr_pose)**(1./(opt.max_iter*len(self.train_loader)))
+                else:
+                    opt.optim.sched_pose.gamma = (opt.optim.lr_pose_end/opt.optim.lr_pose)**(1./opt.max_iter)
             kwargs = { k:v for k,v in opt.optim.sched_pose.items() if k!="type" }
             self.sched_pose = scheduler(self.optim_pose,**kwargs)
 

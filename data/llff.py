@@ -22,9 +22,12 @@ class Dataset(base.Dataset):
         self.root = opt.data.root or "data/llff"
         self.path = "{}/{}".format(self.root,opt.data.scene)
         self.path_image = "{}/images".format(self.path)
+        self.path_feat = "{}/feats_4".format(self.path)
         image_fnames = sorted(os.listdir(self.path_image))
+        feat_fnames = sorted(os.listdir(self.path_feat))
         poses_raw,bounds = self.parse_cameras_and_bounds(opt)
         self.list = list(zip(image_fnames,poses_raw))
+        self.feat_list = list(zip(feat_fnames,poses_raw))
         # manually split train/val subsets
         num_val_split = int(len(self)*opt.data.val_ratio)
         self.list = self.list[:-num_val_split] if split=="train" else self.list[-num_val_split:]
@@ -33,6 +36,8 @@ class Dataset(base.Dataset):
         if opt.data.preload:
             self.images = self.preload_threading(opt,self.get_image)
             self.cameras = self.preload_threading(opt,self.get_camera,data_str="cameras")
+            if opt.feature.encode:
+                self.feats = self.preload_threading(opt,self.get_feature,data_str="features")
 
     def prefetch_all_data(self,opt):
         assert(not opt.data.augment)
@@ -79,6 +84,12 @@ class Dataset(base.Dataset):
         aug = self.generate_augmentation(opt) if self.augment else None
         image = self.images[idx] if opt.data.preload else self.get_image(opt,idx)
         image = self.preprocess_image(opt,image,aug=aug)
+        if opt.feature.encode:
+            feat = self.feats[idx] if opt.data.preload else self.get_feature(opt,idx)
+            feat = self.preprocess_feature(opt,feat)
+            sample.update(
+                feat_gt=feat
+            )
         intr,pose = self.cameras[idx] if opt.data.preload else self.get_camera(opt,idx)
         intr,pose = self.preprocess_camera(opt,intr,pose,aug=aug)
         sample.update(
@@ -92,6 +103,11 @@ class Dataset(base.Dataset):
         image_fname = "{}/{}".format(self.path_image,self.list[idx][0])
         image = PIL.Image.fromarray(imageio.imread(image_fname)) # directly using PIL.Image.open() leads to weird corruption....
         return image
+
+    def get_feature(self, opt, idx):
+        feat_fname = "{}/{}".format(self.path_feat,self.feat_list[idx][0])
+        feat = np.load(feat_fname)
+        return feat
 
     def get_camera(self,opt,idx):
         intr = torch.tensor([[self.focal,0,self.raw_W/2],

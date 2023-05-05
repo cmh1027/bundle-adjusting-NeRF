@@ -112,20 +112,26 @@ class Model(base.Model):
             util_vis.tb_image(opt,self.tb,step,split,"image",var.image)
             if split!="train":
                 invdepth = (1-var.depth)/var.opacity if opt.camera.ndc else 1/(var.depth/var.opacity+eps)
+                invdepth_static = (1-var.static_depth)/var.opacity if opt.camera.ndc else 1/(var.static_depth/var.opacity+eps)
                 rgb_map = var.rgb.view(-1,H,W,3).permute(0,3,1,2) # [B,3,H,W]
                 static_rgb_map = var.static_rgb.view(-1,H,W,3).permute(0,3,1,2) # [B,3,H,W]
                 invdepth_map = invdepth.view(-1,H,W,1).permute(0,3,1,2) # [B,1,H,W]
+                invdepth_map_static = invdepth_static.view(-1,H,W,1).permute(0,3,1,2) # [B,1,H,W]
                 util_vis.tb_image(opt,self.tb,step,split,"rgb",rgb_map)
                 util_vis.tb_image(opt,self.tb,step,split,"static_rgb",static_rgb_map)
                 util_vis.tb_image(opt,self.tb,step,split,"invdepth",invdepth_map)
+                util_vis.tb_image(opt,self.tb,step,split,"static_invdepth",invdepth_map_static)
                 if opt.nerf.fine_sampling:
                     invdepth = (1-var.depth_fine)/var.opacity_fine if opt.camera.ndc else 1/(var.depth_fine/var.opacity_fine+eps)
+                    invdepth_static = (1-var.static_depth_fine)/var.opacity_fine if opt.camera.ndc else 1/(var.static_depth_fine/var.opacity_fine+eps)
                     rgb_map = var.rgb_fine.view(-1,H,W,3).permute(0,3,1,2) # [B,3,H,W]
                     static_rgb_map = var.static_rgb_fine.view(-1,H,W,3).permute(0,3,1,2) # [B,3,H,W]
                     invdepth_map = invdepth.view(-1,H,W,1).permute(0,3,1,2) # [B,1,H,W]
+                    invdepth_map_static = invdepth_static.view(-1,H,W,1).permute(0,3,1,2) # [B,1,H,W]
                     util_vis.tb_image(opt,self.tb,step,split,"rgb_fine",rgb_map)
                     util_vis.tb_image(opt,self.tb,step,split,"static_rgb_fine",static_rgb_map)
                     util_vis.tb_image(opt,self.tb,step,split,"invdepth_fine",invdepth_map)
+                    util_vis.tb_image(opt,self.tb,step,split,"static_invdepth_fine",invdepth_map_static)
 
     @torch.no_grad()
     def get_all_training_poses(self,opt):
@@ -384,9 +390,9 @@ class NeRF(torch.nn.Module):
         for li,(k_in,k_out) in enumerate(xyz_dims):
             if li==0: k_in = input_3D_dim
             if li in opt.arch.skip: k_in += input_3D_dim
-            if li==len(xyz_dims)-1 and not opt.transient.encode: k_out += 1
+            if li==len(xyz_dims)-1 and not opt.transient.encode and not opt.feature.encode: k_out += 1
             linear = torch.nn.Linear(k_in,k_out)
-            if opt.arch.tf_init and not opt.transient.encode:
+            if opt.arch.tf_init:
                 self.tensorflow_init_weights(opt,linear,out="first" if li==len(xyz_dims)-1 else None)
             self.mlp_xyz.append(linear)
         if opt.transient.encode or opt.feature.encode:
@@ -410,7 +416,7 @@ class NeRF(torch.nn.Module):
                 else:
                     k_in = opt.feature.dim+(input_view_dim if opt.nerf.view_dep else 0)
             linear = torch.nn.Linear(k_in,k_out)
-            if opt.arch.tf_init and not opt.transient.encode:
+            if opt.arch.tf_init:
                 self.tensorflow_init_weights(opt,linear,out="all" if li==len(rgb_dims)-1 else None)
             self.mlp_rgb.append(linear)
         # transient feature
@@ -551,7 +557,6 @@ class NeRF(torch.nn.Module):
         dist_samples = depth_intv_samples*ray_length # [B,HW,N]
         sigma_delta = samples.density*dist_samples # [B,HW,N]\
         alpha = 1-(-sigma_delta).exp_() # [B,HW,N]
-        
         if opt.transient.encode:
             sigma_t_delta = samples.density_t*dist_samples # [B,HW,N]
             alpha_t = 1-(-sigma_t_delta).exp_() # [B,HW,N]
@@ -566,11 +571,13 @@ class NeRF(torch.nn.Module):
             composite_T = static_T
         static_only_weight = (static_T*alpha)[...,None]
         static_weight = (composite_T*alpha)[...,None]
+        static_prob = (static_T*alpha)[...,None] # [B,HW,N,1]
         prob = (composite_T*alpha_sum)[...,None] # [B,HW,N,1]
         opacity = prob.sum(dim=2) # [B,HW,1]
         # integrate RGB and depth weighted by probability
+        static_depth = (depth_samples*static_prob).sum(dim=2)
         depth = (depth_samples*prob).sum(dim=2) # [B,HW,1]
-        ret.update(opacity=opacity, prob=prob, depth=depth)
+        ret.update(opacity=opacity, prob=prob, depth=depth, static_depth=static_depth)
         static_rgb = (samples.rgb*static_only_weight).sum(dim=2)
         if opt.nerf.setbg_opaque:
             static_rgb = static_rgb+opt.data.bgcolor*(1-opacity)

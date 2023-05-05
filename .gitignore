@@ -129,5 +129,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-./data/blender
-./data/llff
+data/blender
+data/llff
+command/

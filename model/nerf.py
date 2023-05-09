@@ -34,8 +34,12 @@ class Model(base.Model):
     def setup_optimizer(self,opt):
         log.info("setting up optimizers...")
         optimizer = getattr(torch.optim,opt.optim.algo)
-        self.optim = optimizer([dict(params=self.graph.nerf.parameters(),lr=opt.optim.lr)])
+        params = list(self.graph.nerf.parameters())
+        if opt.transient.encode:
+            params += [self.graph.embedding_t.weight]
+        self.optim = optimizer([dict(params=params,lr=opt.optim.lr)])
         if opt.nerf.fine_sampling:
+            assert(opt.transient.encode is False), "t_embedding for fine sampling is not implemented!"
             self.optim.add_param_group(dict(params=self.graph.nerf_fine.parameters(),lr=opt.optim.lr))
         # set up scheduler
         if opt.optim.sched:
@@ -66,6 +70,9 @@ class Model(base.Model):
                 if opt.optim.sched: self.sched.step()
                 if self.it%opt.freq.val==0: self.validate(opt,self.it)
                 if self.it%opt.freq.ckpt==0: self.save_checkpoint(opt,ep=None,it=self.it)
+                if self.it == opt.early_stop:
+                    print(f"Early stop at {self.it} iter")
+                    break
         else:
             max_iter = int(600000 * 2048 / (len(self.train_loader) * opt.nerf.rand_rays))
             for epoch in tqdm.trange(max_iter,desc="training",leave=False):
@@ -98,12 +105,27 @@ class Model(base.Model):
                 self.tb.add_scalar("{0}/{1}".format(split,"lr_fine"),lr,step)
         # compute PSNR
         assert(mse is not None)
-        psnr = -10*mse.coarse.log10()
-        self.tb.add_scalar("{0}/{1}".format(split,"PSNR"),psnr,step)
-        if opt.nerf.fine_sampling:
-            psnr = -10*mse.fine.log10()
-            self.tb.add_scalar("{0}/{1}".format(split,"PSNR_fine"),psnr,step)
-
+        if not opt.feature.encode:
+            psnr = -10*mse.coarse.log10()
+            self.tb.add_scalar("{0}/{1}".format(split,"PSNR"),psnr,step)
+            if opt.nerf.fine_sampling:
+                psnr = -10*mse.fine.log10()
+                self.tb.add_scalar("{0}/{1}".format(split,"PSNR_fine"),psnr,step)
+        else:
+            coef = self.graph.nerf.get_refine_coef(opt)
+            if coef > 0:
+                psnr = -10*mse.coarse.log10()
+                self.tb.add_scalar("{0}/{1}".format(split,"PSNR"),psnr,step)
+                if opt.nerf.fine_sampling:
+                    psnr = -10*mse.fine.log10()
+                    self.tb.add_scalar("{0}/{1}".format(split,"PSNR_fine"),psnr,step)
+            if coef < 1:
+                psnr = -10*mse.coarse_feat.log10()
+                self.tb.add_scalar("{0}/{1}".format(split,"PSNR_feat"),psnr,step)
+                if opt.nerf.fine_sampling:
+                    psnr = -10*mse.fine_feat.log10()
+                    self.tb.add_scalar("{0}/{1}".format(split,"PSNR_fine_feat"),psnr,step)
+        
     @torch.no_grad()
     def visualize(self,opt,var,step=0,split="train",eps=1e-10):
         if 'W' in var and 'H' in var: W, H = int(var.W), int(var.H)
@@ -288,10 +310,14 @@ class Graph(base.Graph):
             if opt.nerf.fine_sampling:
                 loss.feat_fine = self.MSE_loss(var.feat_fine,feat_gt) * (1-coef)
                 loss.static_rgb_fine = self.MSE_loss(var.static_rgb_fine,image) * coef
-        rgb_mse = edict(coarse = self.MSE_loss(var.static_rgb,image))
+        mse = edict(coarse = self.MSE_loss(var.static_rgb,image))
         if opt.nerf.fine_sampling:
-            rgb_mse.update(fine = self.MSE_loss(var.static_rgb_fine,image))
-        return loss, rgb_mse
+            mse.update(fine = self.MSE_loss(var.static_rgb_fine,image))
+        if opt.feature.encode:
+            mse.update(coarse_feat = self.MSE_loss(var.feat,feat_gt))
+            if opt.nerf.fine_sampling:
+                mse.update(fine_feat = self.MSE_loss(var.feat_fine,feat_gt))
+        return loss, mse
 
     def get_pose(self,opt,var,mode=None):
         return var.pose

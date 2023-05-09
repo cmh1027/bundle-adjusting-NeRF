@@ -73,3 +73,5 @@ transient:
 feature:
     encode: False
     dim: 384
+
+early_stop:

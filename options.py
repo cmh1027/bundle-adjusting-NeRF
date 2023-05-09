@@ -74,8 +74,8 @@ def override_options(opt,opt_over,key_stack=None,safe_check=False):
         else:
             # ensure command line argument to override is also in yaml file
             if safe_check and key not in opt:
-                add_new = 'y'
                 add_new = None
+                add_new = 'y'
                 while add_new not in ["y","n"]:
                     key_str = ".".join(key_stack+[key])
                     add_new = input("\"{}\" not found in original opt, add? (y/n) ".format(key_str))

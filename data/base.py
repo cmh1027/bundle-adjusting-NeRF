@@ -117,6 +117,7 @@ class Dataset(torch.utils.data.Dataset):
             feat = feat.unsqueeze(0)
             feat = torch_F.interpolate(feat, size=(opt.W, opt.H), mode='bilinear')
             feat = feat.squeeze(0)
+        feat = feat / feat.norm(dim=0, keepdim=True)
         return feat
 
     def preprocess_camera(self,opt,intr,pose,aug=None):

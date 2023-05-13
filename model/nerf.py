@@ -30,6 +30,8 @@ class Model(base.Model):
         if opt.data.dataset != 'phototourism':
             self.train_data.prefetch_all_data(opt)
             self.train_data.all = edict(util.move_to_device(self.train_data.all,opt.device,exclude=['feat_gt']))
+        else:
+            opt.max_iter = int(600000 * 2048 / (len(self.train_loader) * opt.nerf.rand_rays))
 
     def setup_optimizer(self,opt):
         log.info("setting up optimizers...")
@@ -74,8 +76,8 @@ class Model(base.Model):
                     print(f"Early stop at {self.it} iter")
                     break
         else:
-            max_iter = int(600000 * 2048 / (len(self.train_loader) * opt.nerf.rand_rays))
-            for epoch in tqdm.trange(max_iter,desc="training",leave=False):
+            for epoch in tqdm.trange(opt.max_iter,desc="training",leave=False):
+                if epoch<self.epoch_start: continue
                 loader = tqdm.tqdm(self.train_loader,desc="training epoch {}".format(epoch+1),leave=False)
                 for i_pic, batch in enumerate(loader):
                     self.it = epoch * len(loader) + i_pic
@@ -92,6 +94,7 @@ class Model(base.Model):
             self.tb.close()
         if opt.visdom: self.vis.close()
         log.title("TRAINING DONE")
+        self.save_checkpoint(opt,ep=epoch,it=self.it)
 
     @torch.no_grad()
     def log_scalars(self,opt,var,loss,metric=None,step=0,split="train",mse=None):

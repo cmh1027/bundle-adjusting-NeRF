@@ -9,18 +9,12 @@ arch:                                                       # architectural opti
         L_view: 4                                           # number of bases (viewpoint)
     density_activ: softplus                                 # activation function for output volume density
     tf_init: true                                           # initialize network weights in TensorFlow style
-    depth: 6
-    width: 256
-    sigmoid: true
     garf: false
-    gaussian:
-        sigma: 0.1
-
 nerf:                                                       # NeRF-specific options
     view_dep: true                                          # condition MLP on viewpoint
     depth:                                                  # depth-related options
-        param: metric                                       # depth parametrization (for sampling along the ray)
-        range: [0.1, 5.0]                                   # near/far bounds for depth sampling
+        param: inverse                                      # depth parametrization (for sampling along the ray)
+        range: [1,0]                                        # near/far bounds for depth sampling
     sample_intvs: 128                                       # number of samples
     sample_stratified: true                                 # stratified sampling
     fine_sampling: false                                    # hierarchical sampling with another NeRF
@@ -30,12 +24,14 @@ nerf:                                                       # NeRF-specific opti
     setbg_opaque:                                           # fill transparent rendering with known background color (Blender only)
 
 data:                                                       # data options
-    dataset: phototourism                                   # dataset name
-    scene: brandenburg                                      # scene name
+    dataset: bleff                                          # dataset name
+    mode: mix_rt/t000r000
+    scene: balls1                                           # scene name
     image_size: [480,640]                                   # input image sizes [height,width]
     num_workers: 4                                          # number of parallel workers for data loading
     preload: true                                           # preload the entire dataset into the memory
     val_ratio: 0.1                                          # ratio of sequence split for validation
+    bgcolor: 1                                              # used for blender_llff
 
 camera:                                                     # camera options
     model: perspective                                      # type of camera model
@@ -61,10 +57,3 @@ freq:                                                       # periodic actions d
     vis: 1000                                               # visualize results (every N iterations)
     val: 2000                                               # validate on val set (every N iterations)
     ckpt: 5000                                              # save checkpoint (every N iterations)
-
-img_downscale: 2
-
-init:                                                       # intialization options
-    weight:                                                 # initialize network weights with uniform distribution
-        uniform: false
-        range: 0.1

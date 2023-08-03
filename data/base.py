@@ -107,6 +107,10 @@ class Dataset(torch.utils.data.Dataset):
         if opt.data.image_size[0] is not None:
             image = image.resize((opt.W,opt.H))
         image = torchvision_F.to_tensor(image)
+        if opt.data.noise_prob is not None:
+            positive_noise = (torch.rand_like(image) < opt.data.noise_prob / 2).float() * (torch.rand_like(image) / 10)
+            negative_noise = -1 * (torch.rand_like(image) < opt.data.noise_prob / 2).float() * (torch.rand_like(image) / 10)
+            image = (image + positive_noise + negative_noise).clamp(min=0., max=1.)
         return image
 
     def preprocess_feature(self,opt,feat):

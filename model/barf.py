@@ -81,7 +81,7 @@ class Model(nerf.Model):
             lr = self.optim_pose.param_groups[0]["lr"]
             self.tb.add_scalar("{0}/{1}".format(split,"lr_pose"),lr,step)
         # compute pose error
-        if split=="train" and opt.data.dataset in ["blender","llff", "phototourism"]:
+        if split=="train":
             pose,pose_GT = self.get_all_training_poses(opt)
             pose_aligned,_ = self.prealign_cameras(opt,pose,pose_GT)
             error = self.evaluate_camera_alignment(opt,pose_aligned,pose_GT)
@@ -217,9 +217,9 @@ class Graph(nerf.Graph):
 
     def __init__(self,opt):
         super().__init__(opt)
-        self.nerf = NeRF(opt)
+        self.nerf = NeRF(opt) if not opt.arch.garf else NeRF_Gaussian(opt)
         if opt.nerf.fine_sampling:
-            self.nerf_fine = NeRF(opt)
+            self.nerf_fine = NeRF(opt) if not opt.arch.garf else NeRF_Gaussian(opt)
         self.pose_eye = torch.eye(3,4).to(opt.device)
 
     def get_pose(self,opt,var,mode=None):
@@ -281,3 +281,21 @@ class NeRF(nerf.NeRF):
             progress = (progress-s)/(e-s)
             coef = (1-math.cos(math.pi*progress))/2
         return coef
+
+class NeRF_Gaussian(nerf.NeRF_Gaussian):
+    def __init__(self,opt):
+        super().__init__(opt)
+        self.progress = torch.nn.Parameter(torch.tensor(0.)) # use Parameter so it could be checkpointed
+
+    def get_refine_coef(self, opt): # only for loss computing
+        progress = self.progress.data
+        s,e = opt.decay.start
+        if progress<s:
+            coef = 0
+        elif progress>e:
+            coef = 1
+        else:
+            progress = (progress-s)/(e-s)
+            coef = (1-math.cos(math.pi*progress))/2
+        return coef
+

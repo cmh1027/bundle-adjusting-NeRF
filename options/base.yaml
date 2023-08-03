@@ -28,6 +28,7 @@ data:                                                       # data options
     val_on_test: false                                      # validate on test set during training
     train_sub:                                              # consider a subset of N training samples
     val_sub:                                                # consider a subset of N validation samples
+    noise_prob:
 
 loss_weight: {}                                             # loss weights (in log scale)
 
@@ -64,14 +65,11 @@ decay:
 transient:
     encode: False
     size: 16
-    beta_min: 0.03
     num_layers: 4
-    lambd: 0.01
-    alpha_reg: 0.6
-    
     
 feature:
     encode: False
     dim: 384
 
 early_stop:
+

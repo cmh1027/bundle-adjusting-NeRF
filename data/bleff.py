@@ -17,55 +17,57 @@ from util import log,debug
 class Dataset(base.Dataset):
 
     def __init__(self,opt,split="train",subset=None):
-        self.raw_H,self.raw_W = 3024,4032
+        self.raw_H,self.raw_W = 1040,1560
         super().__init__(opt,split)
-        self.root = opt.data.root or "data/llff"
-        self.path = "{}/{}".format(self.root,opt.data.scene)
-        self.path_image = "{}/images".format(self.path)
-        self.path_feat = "{}/feats_4".format(self.path)
-        image_fnames = sorted(os.listdir(self.path_image))
+        self.root = opt.data.root or "data/bleff"
+        self.path = "{}/{}/{}".format(self.root,opt.data.mode,opt.data.scene)
         
-        poses_raw,bounds = self.parse_cameras_and_bounds(opt)
-        self.list = list(zip(image_fnames,poses_raw))
-        if opt.feature.encode:
-            feat_fnames = sorted(os.listdir(self.path_feat))
-            self.feat_list = list(zip(feat_fnames,poses_raw))
-        # manually split train/val subsets
-        num_val_split = int(len(self)*opt.data.val_ratio)
-        self.list = self.list[:-num_val_split] if split=="train" else self.list[-num_val_split:]
-        if subset: self.list = self.list[:subset]
-        # preload dataset
+        """ BLEFF has gt_metas.json, containing training and testing """
+        ## load/parse metadata ##
+        meta_fname = "{}/gt_metas.json".format(self.path)
+        with open(meta_fname) as file:
+            self.meta = json.load(file)
+        
+        ## read ids ##
+        if split != "train":
+            ## TODO: ugly hack ##
+            split = "val"
+        img_ids = np.loadtxt("{}/{}_ids.txt".format(self.path, split)).astype(int)
+        self.path_image = "{}/images".format(self.path)
+        self.path_feat = "{}/dino_feature_map_scale2".format(self.path)
+        image_fnames = sorted(os.listdir(self.path_image))
+        image_fnames = list(np.array(image_fnames)[img_ids])
+        self.poses_raw = np.array(self.meta['c2ws']).astype(np.float32)  #(N,4,4)
+        
+        self.poses = self.parse_cameras_and_bounds(opt)
+        self.poses = self.poses[img_ids]
+        
+        self.list = list(zip(image_fnames, self.poses))
+        ## focal x ##
+        self.focal_x = 0.5 * self.raw_W / np.tan(0.5*self.meta["cam_angle_x"])
+        self.focal_y = 0.5 * self.raw_H / np.tan(0.5*self.meta["cam_angle_y"])        
+        
         if opt.data.preload:
-            self.images = self.preload_threading(opt,self.get_image)
-            self.cameras = self.preload_threading(opt,self.get_camera,data_str="cameras")
+            self.images = self.preload_threading(opt, self.get_image)
+            self.cameras = self.preload_threading(opt, self.get_camera, data_str="cameras")
             if opt.feature.encode:
                 self.feats = self.preload_threading(opt,self.get_feature,data_str="features")
-
+                
     def prefetch_all_data(self,opt):
         assert(not opt.data.augment)
         # pre-iterate through all samples and group together
         self.all = torch.utils.data._utils.collate.default_collate([s for s in self])
 
     def parse_cameras_and_bounds(self,opt):
-        fname = "{}/poses_bounds.npy".format(self.path)
-        data = torch.tensor(np.load(fname),dtype=torch.float32)
         # parse cameras (intrinsics and poses)
-        cam_data = data[:,:-2].view([-1,3,5]) # [N,3,5]
-        poses_raw = cam_data[...,:4] # [N,3,4]
-        poses_raw[...,0],poses_raw[...,1] = poses_raw[...,1],-poses_raw[...,0]
-        raw_H,raw_W,self.focal = cam_data[0,:,-1]
-        assert(self.raw_H==raw_H and self.raw_W==raw_W)
-        # parse depth bounds
-        bounds = data[:,-2:] # [N,2]
-        scale = 1./(bounds.min()*0.75) # not sure how this was determined
-        poses_raw[...,3] *= scale
-        bounds *= scale
+        poses_raw = self.poses_raw[:,:3]
         # roughly center camera poses
         poses_raw = self.center_camera_poses(opt,poses_raw)
-        return poses_raw,bounds
+        return poses_raw
 
     def center_camera_poses(self,opt,poses):
         # compute average pose
+        poses = torch.tensor(poses, dtype=torch.float32)
         center = poses[...,3].mean(dim=0)
         v1 = torch_F.normalize(poses[...,1].mean(dim=0),dim=0)
         v2 = torch_F.normalize(poses[...,2].mean(dim=0),dim=0)
@@ -94,6 +96,7 @@ class Dataset(base.Dataset):
             )
         intr,pose = self.cameras[idx] if opt.data.preload else self.get_camera(opt,idx)
         intr,pose = self.preprocess_camera(opt,intr,pose,aug=aug)
+
         sample.update(
             image=image,
             intr=intr,
@@ -101,21 +104,31 @@ class Dataset(base.Dataset):
         )
         return sample
 
+    def get_feature(self, opt, idx):
+        feat_fname = "{}/{}".format(self.path_feat,self.list[idx][0][:-4]+".npy")
+        feat = np.load(feat_fname)
+        return feat
+
     def get_image(self,opt,idx):
         image_fname = "{}/{}".format(self.path_image,self.list[idx][0])
         image = PIL.Image.fromarray(imageio.imread(image_fname)) # directly using PIL.Image.open() leads to weird corruption....
         return image
 
-    def get_feature(self, opt, idx):
-        feat_fname = "{}/{}".format(self.path_feat,self.feat_list[idx][0])
-        feat = np.load(feat_fname)
-        return feat
+    def preprocess_image(self, opt, image, aug=None):
+        """
+        All blender datasets are stored four channels RGBA
+        """
+        image = super().preprocess_image(opt, image, aug)
+        rgb, mask = image[:3], image[3:]
+        if opt.data.bgcolor is not None:
+            rgb = rgb*mask+opt.data.bgcolor*(1-mask)
+        return rgb 
 
     def get_camera(self,opt,idx):
-        intr = torch.tensor([[self.focal,0,self.raw_W/2],
-                             [0,self.focal,self.raw_H/2],
+        intr = torch.tensor([[self.focal_x,0,self.raw_W/2],
+                             [0,self.focal_y,self.raw_H/2],
                              [0,0,1]]).float()
-        pose_raw = self.list[idx][1]
+        pose_raw = self.poses[idx]
         pose = self.parse_raw_camera(opt,pose_raw)
         return intr,pose
 

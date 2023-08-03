@@ -94,7 +94,6 @@ class Model(base.Model):
             self.tb.close()
         if opt.visdom: self.vis.close()
         log.title("TRAINING DONE")
-        self.save_checkpoint(opt,ep=epoch,it=self.it)
 
     @torch.no_grad()
     def log_scalars(self,opt,var,loss,metric=None,step=0,split="train",mse=None):
@@ -248,12 +247,11 @@ class Model(base.Model):
 # ============================ computation graph for forward/backprop ============================
 
 class Graph(base.Graph):
-
     def __init__(self,opt):
         super().__init__(opt)
-        self.nerf = NeRF(opt)
+        self.nerf = NeRF(opt) if not opt.arch.garf else NeRF_Gaussian(opt)
         if opt.nerf.fine_sampling:
-            self.nerf_fine = NeRF(opt)
+            self.nerf_fine = NeRF(opt) if not opt.arch.garf else NeRF_Gaussian(opt)
 
     def forward(self,opt,var,mode=None):
         batch_size = len(var.idx)
@@ -634,3 +632,151 @@ class NeRF(torch.nn.Module):
         input_enc = torch.stack([sin,cos],dim=-2) # [B,...,N,2,L]
         input_enc = input_enc.view(*shape[:-1],-1) # [B,...,2NL]
         return input_enc
+class NeRF_Gaussian(torch.nn.Module):
+    def __init__(self,opt):
+        super().__init__()
+        self.define_network(opt)
+        print("GARF activated")
+    def define_network(self,opt):
+        input_3D_dim = 3
+        if opt.nerf.view_dep:
+            input_view_dim = 3
+
+        self.gaussian_linear_d = torch.nn.Linear(input_3D_dim, opt.arch.width)
+        self.gaussian_linear_c = torch.nn.Linear(input_view_dim, opt.arch.width)
+
+        self.pts_linears = torch.nn.ModuleList(
+            [torch.nn.Linear(opt.arch.width, opt.arch.width)] + [torch.nn.Linear(opt.arch.width, opt.arch.width) if i not in opt.arch.skip else torch.nn.Linear(opt.arch.width + opt.arch.width, opt.arch.width) for i in range(opt.arch.depth-1)])
+        
+        self.views_linears = torch.nn.ModuleList([torch.nn.Linear(opt.arch.width+opt.arch.width, opt.arch.width//2)])
+
+        if opt.nerf.view_dep:
+            self.feature_linear = torch.nn.Linear(opt.arch.width, opt.arch.width)
+            self.alpha_linear = torch.nn.Linear(opt.arch.width, 1)
+            self.rgb_linear = torch.nn.Linear(opt.arch.width//2, 3)
+        else:
+            self.output_linear = torch.nn.Linear(opt.arch.width, 4)
+
+        if opt.init.weight.uniform:
+            self.uniform_init_weights(opt, self.gaussian_linear_d.weight)
+            self.uniform_init_weights(opt, self.gaussian_linear_c.weight)
+            self.uniform_init_weights(opt, self.feature_linear.weight)
+            self.uniform_init_weights(opt, self.alpha_linear.weight)
+            self.uniform_init_weights(opt, self.rgb_linear.weight)
+
+            for i, layer in enumerate(self.pts_linears):
+                self.uniform_init_weights(opt, layer.weight)
+
+            for i,layer in enumerate(self.views_linears):
+                self.uniform_init_weights(opt, layer.weight)
+
+    def forward(self,opt,points_3D,ray_unit=None,mode=None, t_emb=None): # [B,...,3]
+        feat = self.gaussian_init_d(opt,points_3D)
+        points_enc = feat
+        for i, l in enumerate(self.pts_linears):
+            feat = self.pts_linears[i](feat)
+            feat = self.gaussian(opt,feat)
+            if i in opt.arch.skip:
+                feat = torch.cat([points_enc, feat], -1)
+
+        if opt.nerf.view_dep:
+            alpha = self.alpha_linear(feat)
+            feature = self.feature_linear(feat)
+
+            ray_enc = self.gaussian_init_c(opt,ray_unit)
+            h = torch.cat([feature, ray_enc], -1)
+        
+            for i, l in enumerate(self.views_linears):
+                h = self.views_linears[i](h)
+                h = self.gaussian(opt,h)
+            rgb = self.rgb_linear(h)
+        if opt.arch.sigmoid:
+            rgb = rgb.sigmoid_() # [B,...,3]
+        if opt.nerf.density_noise_reg and mode == "train":
+            alpha += torch.randn_like(alpha)* opt.nerf.density_noise_reg
+        density_activ = getattr(torch_F, opt.arch.density_activ)
+        density = density_activ(alpha)
+        return edict(rgb=rgb, density=density.squeeze(-1))
+
+
+    def forward_samples(self,opt,center,ray,depth_samples,mode=None, t_emb=None):
+        points_3D_samples = camera.get_3D_points_from_depth(opt,center,ray,depth_samples,multi_samples=True) # [B,HW,N,3]
+        if opt.nerf.view_dep:
+            ray_unit = torch_F.normalize(ray,dim=-1) # [B,HW,3]
+            ray_unit_samples = ray_unit[...,None,:].expand_as(points_3D_samples) # [B,HW,N,3]
+        else: ray_unit_samples = None
+        return self.forward(opt,points_3D_samples,ray_unit=ray_unit_samples,mode=mode, t_emb=t_emb) # [B,HW,N],[B,HW,N,3]
+
+    def composite(self,opt,ray,samples,depth_samples):
+        ret = edict()
+        ray_length = ray.norm(dim=-1,keepdim=True) # [B,HW,1]
+        # volume rendering: compute probability (using quadrature)
+        depth_intv_samples = depth_samples[...,1:,0]-depth_samples[...,:-1,0] # [B,HW,N-1]
+        depth_intv_samples = torch.cat([depth_intv_samples,torch.empty_like(depth_intv_samples[...,:1]).fill_(1e10)],dim=2) # [B,HW,N]
+        dist_samples = depth_intv_samples*ray_length # [B,HW,N]
+        sigma_delta = samples.density*dist_samples # [B,HW,N]\
+        alpha = 1-(-sigma_delta).exp_() # [B,HW,N]
+        if opt.transient.encode:
+            sigma_t_delta = samples.density_t*dist_samples # [B,HW,N]
+            alpha_t = 1-(-sigma_t_delta).exp_() # [B,HW,N]
+            alpha_sum = 1-(-(sigma_delta + sigma_t_delta)).exp_()
+        else:
+            alpha_sum = alpha
+        static_T = (-torch.cat([torch.zeros_like(sigma_delta[...,:1]),sigma_delta[...,:-1]],dim=2).cumsum(dim=2)).exp_() # [B,HW,N]
+        if opt.transient.encode:
+            composite_T = (-torch.cat([torch.zeros_like(sigma_delta[...,:1]),sigma_delta[...,:-1]+sigma_t_delta[...,:-1]],dim=2).cumsum(dim=2)).exp_() # [B,HW,N]
+            transient_weight = (composite_T*alpha_t)[...,None]
+        else:
+            composite_T = static_T
+        static_only_weight = (static_T*alpha)[...,None]
+        static_weight = (composite_T*alpha)[...,None]
+        static_prob = (static_T*alpha)[...,None] # [B,HW,N,1]
+        prob = (composite_T*alpha_sum)[...,None] # [B,HW,N,1]
+        opacity = prob.sum(dim=2) # [B,HW,1]
+        # integrate RGB and depth weighted by probability
+        static_depth = (depth_samples*static_prob).sum(dim=2)
+        depth = (depth_samples*prob).sum(dim=2) # [B,HW,1]
+        ret.update(opacity=opacity, prob=prob, depth=depth, static_depth=static_depth)
+        static_rgb = (samples.rgb*static_only_weight).sum(dim=2)
+        if opt.nerf.setbg_opaque:
+            static_rgb = static_rgb+opt.data.bgcolor*(1-opacity)
+        if opt.transient.encode and not opt.feature.encode:
+            rgb = (samples.rgb*static_weight + samples.rgb_t*transient_weight).sum(dim=2) # [B,HW,3]
+        else:
+            rgb = static_rgb
+        if opt.nerf.setbg_opaque:
+            rgb = rgb+opt.data.bgcolor*(1-opacity)
+        ret.update(rgb=rgb, static_rgb=static_rgb)
+        if opt.feature.encode:
+            static_feat = (samples.feat*static_only_weight).sum(dim=2) # [B,HW,3]
+            if opt.transient.encode:
+                feat = (samples.feat*static_weight + samples.feat_t*transient_weight).sum(dim=2) # [B,HW,3]
+            else:
+                feat = static_feat
+            ret.update(feat=feat)
+        return ret
+    
+
+    def gaussian_init_d(self,opt,x):
+        x_ = self.gaussian_linear_d(x)
+        mu = torch.mean(x_, axis = -1).unsqueeze(-1)
+        out = (-0.5*(mu-x_)**2/opt.arch.gaussian.sigma**2).exp()
+        return out
+
+    def gaussian_init_c(self,opt,x):
+        x_ = self.gaussian_linear_c(x)
+        mu = torch.mean(x_, axis = -1).unsqueeze(-1)
+        out = (-0.5*(mu-x_)**2/opt.arch.gaussian.sigma**2).exp()
+        return out        
+
+    def gaussian(self,opt,x):
+        """
+        Args:
+            opt
+            x (torch.Tensor [B,num_rays,])
+        """
+        out = (-0.5*(x)**2/opt.arch.gaussian.sigma**2).exp()
+        return out
+
+    def uniform_init_weights(self, opt, weight):
+        torch.nn.init.uniform_(weight, -opt.init.weight.range, opt.init.weight.range)
